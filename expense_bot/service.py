@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import re
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -27,10 +28,12 @@ class ExpenseService:
             "- Beli kopi 25rb\n"
             "- Bayar listrik 450000 kategori Tagihan\n\n"
             "Perintah utama:\n"
-            "- /total (hari ini)\n"
+            "- /total (ringkasan hari, minggu, bulan)\n"
+            "- /total hari ini\n"
             "- /total minggu\n"
             "- /total bulan\n"
             "- /laporan minggu ini\n"
+            "- /laporan bulan ini\n"
             "- /list 10\n"
             "- /budget (lihat budget mingguan)\n"
             "- /budget 2500000 (atur budget mingguan)\n"
@@ -71,7 +74,7 @@ class ExpenseService:
             return self._reply_budget(user_key, clean, args=[])
         if "laporan minggu" in normalized:
             return self._render_report(user_key, period="week")
-        if "laporan bulan" in normalized:
+        if "laporan bulan" in normalized or "laporan bulanan" in normalized:
             return self._render_report(user_key, period="month")
         if any(
             keyword in normalized
@@ -105,7 +108,7 @@ class ExpenseService:
             user_key=user_key, item=item, amount=amount, category=category
         )
         confirmation = (
-            f"Siap! {item} senilai {format_idr(amount)} sudah masuk catatan {category}. ✅\n"
+            f"Siap! {item} senilai {format_idr(amount)} sudah masuk catatan {category}.\n"
             f"ID transaksi: #{expense_id}"
         )
         alerts = self._build_budget_alerts(user_key=user_key, category=category)
@@ -115,14 +118,67 @@ class ExpenseService:
 
     def _reply_total(self, user_key: str, args: list[str]) -> str:
         joined = " ".join(args).lower()
+
         if "bulan" in joined:
-            total = self._total_month(user_key)
-            return f"Total pengeluaran bulan ini: {format_idr(total)}"
+            start_utc, end_utc = self._local_month_range_utc()
+            total = self.db.total_between(user_key, start_utc.isoformat(), end_utc.isoformat())
+            breakdown = self._category_breakdown_text(
+                self.db.top_categories_between(
+                    user_key=user_key,
+                    start_iso=start_utc.isoformat(),
+                    end_iso=end_utc.isoformat(),
+                    limit=20,
+                )
+            )
+            return f"Total pengeluaran bulan ini: {format_idr(total)}\n{breakdown}"
+
         if "minggu" in joined:
-            total = self._total_week(user_key)
-            return f"Total pengeluaran minggu ini: {format_idr(total)}"
-        total = self._total_today(user_key)
-        return f"Total pengeluaran hari ini: {format_idr(total)}"
+            start_utc, end_utc = self._local_week_range_utc()
+            total = self.db.total_between(user_key, start_utc.isoformat(), end_utc.isoformat())
+            breakdown = self._category_breakdown_text(
+                self.db.top_categories_between(
+                    user_key=user_key,
+                    start_iso=start_utc.isoformat(),
+                    end_iso=end_utc.isoformat(),
+                    limit=20,
+                )
+            )
+            return f"Total pengeluaran minggu ini: {format_idr(total)}\n{breakdown}"
+
+        if "hari" in joined:
+            start_utc, end_utc = self._local_day_range_utc()
+            total = self.db.total_between(user_key, start_utc.isoformat(), end_utc.isoformat())
+            breakdown = self._category_breakdown_text(
+                self.db.top_categories_between(
+                    user_key=user_key,
+                    start_iso=start_utc.isoformat(),
+                    end_iso=end_utc.isoformat(),
+                    limit=20,
+                )
+            )
+            day_label = datetime.now(self.tz).strftime("%d-%m-%Y")
+            return f"Total pengeluaran hari ini ({day_label}): {format_idr(total)}\n{breakdown}"
+
+        # Default: tampilkan ringkasan lengkap agar tidak bingung saat ganti hari.
+        today_total = self._total_today(user_key)
+        week_total = self._total_week(user_key)
+        month_total = self._total_month(user_key)
+        month_start_utc, month_end_utc = self._local_month_range_utc()
+        month_breakdown = self._category_breakdown_text(
+            self.db.top_categories_between(
+                user_key=user_key,
+                start_iso=month_start_utc.isoformat(),
+                end_iso=month_end_utc.isoformat(),
+                limit=20,
+            )
+        )
+        return (
+            "Ringkasan total:\n"
+            f"- Hari ini: {format_idr(today_total)}\n"
+            f"- Minggu ini: {format_idr(week_total)}\n"
+            f"- Bulan ini: {format_idr(month_total)}\n"
+            f"{month_breakdown}"
+        )
 
     def _reply_list(self, user_key: str, args: list[str]) -> str:
         limit = 10
@@ -133,14 +189,29 @@ class ExpenseService:
         if not records:
             return "Belum ada transaksi."
 
-        rows = []
+        rows: list[str] = []
+        listed_total = 0
+        category_totals: dict[str, int] = defaultdict(int)
         for rec in records:
             local_dt = datetime.fromisoformat(rec.created_at).astimezone(self.tz)
             dt_txt = local_dt.strftime("%d-%m %H:%M")
+            listed_total += rec.amount
+            category_totals[rec.category] += rec.amount
             rows.append(
                 f"#{rec.id} | {dt_txt} | {rec.item} | {format_idr(rec.amount)} | {rec.category}"
             )
-        return "Transaksi terakhir:\n" + "\n".join(rows)
+
+        sorted_categories = sorted(category_totals.items(), key=lambda x: x[1], reverse=True)
+        category_rows = [f"- {cat}: {format_idr(total)}" for cat, total in sorted_categories]
+
+        return (
+            f"Transaksi terakhir ({len(records)} data):\n"
+            + "\n".join(rows)
+            + "\n\n"
+            + f"Total dari daftar ini: {format_idr(listed_total)}\n"
+            + "Total per kategori (dari daftar ini):\n"
+            + ("\n".join(category_rows) if category_rows else "-")
+        )
 
     def _reply_delete(self, user_key: str, args: list[str]) -> str:
         if not args:
@@ -203,7 +274,7 @@ class ExpenseService:
 
     def _reply_report(self, user_key: str, raw_text: str, args: list[str]) -> str:
         joined = " ".join(args).lower() if args else raw_text.lower()
-        if "bulan" in joined:
+        if any(token in joined for token in ("bulan", "bulanan", "monthly", "1 bulan")):
             return self._render_report(user_key, period="month")
         return self._render_report(user_key, period="week")
 
@@ -229,7 +300,7 @@ class ExpenseService:
         )
         remaining = budget - total
 
-        lines = [f"{title} 📊", f"Total pengeluaran: {format_idr(total)}", "Top 3 kategori:"]
+        lines = [title, f"Total pengeluaran: {format_idr(total)}", "Top 3 kategori:"]
         if not top3:
             lines.append("1. Belum ada transaksi.")
         else:
@@ -244,7 +315,7 @@ class ExpenseService:
     def _reply_split_bill(self, split) -> str:
         per_person = int(math.ceil(split.grand_total / split.people))
         lines = [
-            "Mode patungan aktif 🤝",
+            "Mode patungan aktif",
             f"Subtotal: {format_idr(split.subtotal)}",
             f"Service: {format_idr(split.service_amount)}",
             f"Pajak: {format_idr(split.tax_amount)}",
@@ -269,7 +340,7 @@ class ExpenseService:
             if ratio >= 1:
                 alerts.append(
                     f"Budget mingguan terlewati ({format_idr(total_week)} / {format_idr(weekly_budget)}). "
-                    "Gas rem dikit ya 😄"
+                    "Gas rem dikit ya."
                 )
             elif ratio >= 0.8:
                 alerts.append(
@@ -299,6 +370,13 @@ class ExpenseService:
     @staticmethod
     def _default_category_budget(weekly_budget: int) -> int:
         return max(300000, int(weekly_budget * 0.3))
+
+    @staticmethod
+    def _category_breakdown_text(category_totals: list[tuple[str, int]]) -> str:
+        if not category_totals:
+            return "Belum ada pengeluaran pada periode ini."
+        rows = [f"- {category}: {format_idr(amount)}" for category, amount in category_totals]
+        return "Total per kategori:\n" + "\n".join(rows)
 
     def _local_day_range_utc(self) -> tuple[datetime, datetime]:
         now_local = datetime.now(self.tz)
@@ -343,3 +421,4 @@ class ExpenseService:
             start_iso=start_utc.isoformat(),
             end_iso=end_utc.isoformat(),
         )
+

@@ -6,7 +6,7 @@ from typing import Optional
 
 
 AMOUNT_TOKEN_RE = re.compile(
-    r"(?i)(?:rp\.?\s*)?(\d+(?:[.,]\d+)?(?:[.,]\d{3})*)(?:\s*(rb|ribu|k|jt|juta))?"
+    r"(?i)(?:rp\.?\s*)?(\d+(?:[.,]\d+)?(?:[.,]\d{3})*)(?:\s*(rb|ribu|k|jt|juta)\b)?"
 )
 PERCENT_RE = re.compile(r"(?i)(\d+(?:[.,]\d+)?)\s*%")
 DATE_RE = re.compile(r"(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})")
@@ -196,6 +196,12 @@ def parse_expense_input(text: str) -> Optional[ParsedExpense]:
     if not clean:
         return None
 
+    category = ""
+    category_match = re.search(r"(?i)(?:kategori|cat)\s*[:=-]?\s*([a-zA-Z/& ]+)$", clean)
+    if category_match:
+        category = normalize_category(category_match.group(1))
+        clean = clean[: category_match.start()].strip()
+
     amount_match = AMOUNT_TOKEN_RE.search(clean)
     if not amount_match:
         return None
@@ -203,12 +209,6 @@ def parse_expense_input(text: str) -> Optional[ParsedExpense]:
     amount = parse_amount_token(amount_match.group(0))
     if not amount or amount <= 0:
         return None
-
-    category = ""
-    category_match = re.search(r"(?i)(?:kategori|cat)\s*[:=-]?\s*([a-zA-Z/& ]+)$", clean)
-    if category_match:
-        category = normalize_category(category_match.group(1))
-        clean = clean[: category_match.start()].strip()
 
     item_candidate = (clean[: amount_match.start()] + clean[amount_match.end() :]).strip(
         " ,.-:"
@@ -236,7 +236,7 @@ def parse_percentage_after_keyword(text: str, keyword: str) -> Optional[float]:
 
 def parse_amount_after_keyword(text: str, keyword: str) -> Optional[int]:
     match = re.search(
-        rf"(?i){re.escape(keyword)}\s*[:=]?\s*((?:rp\.?\s*)?\d[\d.,]*(?:\s*(?:rb|ribu|k|jt|juta))?)(?![\d%])",
+        rf"(?i){re.escape(keyword)}\s*[:=]?\s*((?:rp\.?\s*)?\d[\d.,]*(?:\s*(?:rb|ribu|k|jt|juta)\b)?)(?![\d%])",
         text,
     )
     if not match:

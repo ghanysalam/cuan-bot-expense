@@ -16,7 +16,7 @@ DATE_WORD_RE = re.compile(
     re.I,
 )
 MONEY_TOKEN_RE = re.compile(
-    r"(?i)\b(?:rp\.?\s*|idr\s*)?\d[\d.,]*(?:\s*(?:rb|ribu|k|jt|juta))?\b"
+    r"(?i)\b(?:rp\.?\s*|idr\s*)?\d[\d.,]*(?:\s*(?:rb|ribu|k|jt|juta)\b)?\b"
 )
 TOTAL_KEYWORDS = (
     "grand total",
