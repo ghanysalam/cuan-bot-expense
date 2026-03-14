@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import date
 from typing import Optional
 
 
@@ -10,6 +11,7 @@ AMOUNT_TOKEN_RE = re.compile(
 )
 PERCENT_RE = re.compile(r"(?i)(\d+(?:[.,]\d+)?)\s*%")
 DATE_RE = re.compile(r"(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})")
+DATE_WORD_RE = re.compile(r"(?i)\b(\d{1,2})\s+([a-z]{3,12})\s+(\d{2,4})\b")
 
 CATEGORY_KEYWORDS = {
     "Makanan & Minuman": [
@@ -95,6 +97,46 @@ STOPWORDS = (
     "top up",
 )
 
+MONTH_NAME_MAP = {
+    "jan": 1,
+    "januari": 1,
+    "january": 1,
+    "feb": 2,
+    "februari": 2,
+    "february": 2,
+    "mar": 3,
+    "maret": 3,
+    "march": 3,
+    "apr": 4,
+    "april": 4,
+    "mei": 5,
+    "may": 5,
+    "jun": 6,
+    "juni": 6,
+    "june": 6,
+    "jul": 7,
+    "juli": 7,
+    "july": 7,
+    "agu": 8,
+    "agus": 8,
+    "agustus": 8,
+    "aug": 8,
+    "august": 8,
+    "sep": 9,
+    "sept": 9,
+    "september": 9,
+    "okt": 10,
+    "oct": 10,
+    "oktober": 10,
+    "october": 10,
+    "nov": 11,
+    "november": 11,
+    "des": 12,
+    "dec": 12,
+    "desember": 12,
+    "december": 12,
+}
+
 
 @dataclass
 class ParsedExpense:
@@ -125,6 +167,45 @@ class ReceiptInfo:
 
 def format_idr(amount: int) -> str:
     return f"Rp{amount:,}".replace(",", ".")
+
+
+def format_date_id(value: date) -> str:
+    return value.strftime("%d/%m/%Y")
+
+
+def parse_date_input(text: str) -> Optional[date]:
+    clean = text.strip()
+    if not clean:
+        return None
+
+    match = re.search(r"\b(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})\b", clean)
+    if match:
+        day = int(match.group(1))
+        month = int(match.group(2))
+        year = int(match.group(3))
+        if year < 100:
+            year += 2000
+        try:
+            return date(year, month, day)
+        except ValueError:
+            return None
+
+    word_match = DATE_WORD_RE.search(clean)
+    if not word_match:
+        return None
+
+    day = int(word_match.group(1))
+    month_key = word_match.group(2).lower()
+    year = int(word_match.group(3))
+    if year < 100:
+        year += 2000
+    month = MONTH_NAME_MAP.get(month_key)
+    if month is None:
+        return None
+    try:
+        return date(year, month, day)
+    except ValueError:
+        return None
 
 
 def parse_amount_token(token: str) -> Optional[int]:

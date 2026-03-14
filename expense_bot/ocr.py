@@ -1,15 +1,16 @@
 from __future__ import annotations
 
+import base64
 import re
 from dataclasses import dataclass
-from typing import Iterable, Optional, Sequence
+from datetime import date
+from typing import Any, Iterable, Optional, Sequence
 
 import httpx
 
-from .parser import format_idr, infer_category, parse_amount_token
+from .parser import format_date_id, format_idr, infer_category, parse_amount_token, parse_date_input
 
 
-OCR_ENDPOINT = "https://api.ocr.space/parse/image"
 DATE_RE = re.compile(r"\b(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\b")
 DATE_WORD_RE = re.compile(
     r"\b(\d{1,2}\s+(?:jan|feb|mar|apr|mei|may|jun|jul|agu|aug|sep|okt|oct|nov|des|dec)[a-z]*\s+\d{2,4})\b",
@@ -126,18 +127,29 @@ MERCHANT_CATEGORY_OVERRIDES = {
 
 @dataclass
 class ReceiptExtraction:
-    merchant: str
-    date_text: Optional[str]
+    item: str
     total: int
-    category: str
+    tanggal: str
+    kategori: str
+    merchant: str
+    expense_date: Optional[date]
     used_fallback_total: bool
     is_bank_transaction: bool
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "item": self.item,
+            "total": self.total,
+            "tanggal": self.tanggal,
+            "kategori": self.kategori,
+        }
 
 
 @dataclass
 class OCRResult:
     raw_text: str
     receipt: Optional[ReceiptExtraction]
+    structured_data: Optional[dict[str, Any]]
     needs_manual_total_confirmation: bool
     reply_text: str
 
@@ -178,7 +190,6 @@ def _is_plausible_money_token(token: str) -> bool:
     if not has_suffix and len(digits_only) > 12:
         return False
 
-    # Protect against PAN/reference/terminal IDs (long plain digits without money markers).
     if (
         not has_suffix
         and not has_currency
@@ -209,8 +220,8 @@ def _pick_merchant(lines: list[str]) -> str:
         if any(hint in low for hint in MERCHANT_SKIP_HINTS):
             continue
 
-        letters = sum(1 for c in line if c.isalpha())
-        digits = sum(1 for c in line if c.isdigit())
+        letters = sum(1 for char in line if char.isalpha())
+        digits = sum(1 for char in line if char.isdigit())
         score = letters - (digits * 2)
         if "rp" in low:
             score -= 8
@@ -275,7 +286,7 @@ def _pick_bank_merchant(lines: list[str]) -> str:
                 candidate = lines[idx + 1].strip()
 
             candidate_low = candidate.lower()
-            digit_ratio = (sum(c.isdigit() for c in candidate) / max(len(candidate), 1))
+            digit_ratio = sum(char.isdigit() for char in candidate) / max(len(candidate), 1)
             if (
                 len(candidate) >= 3
                 and not any(hint in candidate_low for hint in invalid_hints)
@@ -298,10 +309,9 @@ def _pick_category(merchant: str, lines: Iterable[str]) -> str:
         if key in merchant_low:
             return category
 
-    joined = " ".join(lines)
-    infer_from_text = infer_category(f"{merchant} {joined}")
-    if infer_from_text != "Lainnya":
-        return infer_from_text
+    inferred = infer_category(f"{merchant} {' '.join(lines)}")
+    if inferred != "Lainnya":
+        return inferred
     return "Belanja Lainnya"
 
 
@@ -336,13 +346,12 @@ def _extract_total(lines: list[str], is_bank_transaction: bool) -> tuple[Optiona
 
         if not found_inline and idx + 1 < len(lines):
             next_line = lines[idx + 1].lower()
-            if not any(h in next_line for h in IGNORE_TOTAL_HINTS):
+            if not any(hint in next_line for hint in IGNORE_TOTAL_HINTS):
                 next_amounts = _extract_amounts(lines[idx + 1])
                 if next_amounts:
                     keyword_amounts.append(next_amounts[0])
 
     if keyword_amounts:
-        # Prefer median-ish value among keyword hits to avoid OCR outlier spikes.
         sorted_amounts = sorted(keyword_amounts)
         return sorted_amounts[len(sorted_amounts) // 2], False
 
@@ -363,8 +372,8 @@ def _is_noisy(lines: list[str], total: Optional[int], used_fallback_total: bool)
         return True
 
     joined = " ".join(lines)
-    alnum_count = sum(1 for c in joined if c.isalnum())
-    printable_count = sum(1 for c in joined if c.strip())
+    alnum_count = sum(1 for char in joined if char.isalnum())
+    printable_count = sum(1 for char in joined if char.strip())
     ratio = (alnum_count / printable_count) if printable_count else 0
 
     very_short = len(lines) <= 2
@@ -386,77 +395,119 @@ def extract_receipt_data(ocr_input: str | Sequence[str]) -> OCRResult:
         return OCRResult(
             raw_text=raw_text,
             receipt=None,
+            structured_data=None,
             needs_manual_total_confirmation=True,
             reply_text=(
-                "Sepertinya struknya agak buram, boleh konfirmasi total belanjanya berapa, Kak?"
+                "Sepertinya hasil scan struknya belum cukup jelas. "
+                "Boleh konfirmasi total belanjanya dulu?"
             ),
         )
 
     merchant = _pick_bank_merchant(lines) if is_bank_transaction else _pick_merchant(lines)
     date_match = DATE_RE.search(raw_text)
     if date_match:
-        date_text = date_match.group(1)
+        tanggal = date_match.group(1)
     else:
         date_word_match = DATE_WORD_RE.search(raw_text)
-        date_text = date_word_match.group(1) if date_word_match else "-"
-    category = "Transfer/Bank" if is_bank_transaction else _pick_category(merchant, lines)
+        tanggal = date_word_match.group(1) if date_word_match else "-"
+    expense_date = parse_date_input(tanggal) if tanggal != "-" else None
+    kategori = "Transfer/Bank" if is_bank_transaction else _pick_category(merchant, lines)
+    item = f"Transfer ke {merchant}" if is_bank_transaction else f"Belanja {merchant}"
 
     receipt = ReceiptExtraction(
-        merchant=merchant,
-        date_text=date_text,
+        item=item,
         total=total or 0,
-        category=category,
+        tanggal=format_date_id(expense_date) if expense_date else tanggal,
+        kategori=kategori,
+        merchant=merchant,
+        expense_date=expense_date,
         used_fallback_total=used_fallback,
         is_bank_transaction=is_bank_transaction,
     )
     source_label = "bukti transaksi bank" if is_bank_transaction else "struk"
     confirmation = (
-        f"Wah, {source_label} dari {receipt.merchant} ya! Berhasil dicatat nih:\n\n"
-        f"Total: {format_idr(receipt.total)}\n\n"
-        f"Kategori: {receipt.category}\n\n"
-        f"Tanggal: {receipt.date_text}\n"
-        "Mau langsung simpan atau ada yang mau diubah?"
+        f"Wah, {source_label} dari {receipt.merchant} kebaca nih:\n\n"
+        f"Item: {receipt.item}\n"
+        f"Total: {format_idr(receipt.total)}\n"
+        f"Kategori: {receipt.kategori}\n"
+        f"Tanggal: {receipt.tanggal}\n\n"
+        "Balas `simpan` untuk catat, atau `ubah total/kategori/merchant/tanggal ...`."
     )
     return OCRResult(
         raw_text=raw_text,
         receipt=receipt,
+        structured_data=receipt.to_json(),
         needs_manual_total_confirmation=False,
         reply_text=confirmation,
     )
 
 
 class ReceiptOCR:
-    def __init__(self, api_key: str) -> None:
-        self.api_key = api_key.strip()
+    def __init__(self, endpoint_url: str, api_token: str, model_id: str) -> None:
+        self.endpoint_url = endpoint_url.strip()
+        self.api_token = api_token.strip()
+        self.model_id = model_id.strip() or "microsoft/Florence-2-base"
 
     @property
     def enabled(self) -> bool:
-        return bool(self.api_key)
+        return bool(self.endpoint_url)
 
     async def scan_receipt(self, image_bytes: bytes) -> Optional[OCRResult]:
         if not self.enabled:
             return None
 
-        files = {"file": ("receipt.jpg", image_bytes, "image/jpeg")}
-        data = {
-            "apikey": self.api_key,
-            "language": "eng",
-            "isOverlayRequired": "false",
-            "OCREngine": "2",
-            "scale": "true",
-        }
-
-        async with httpx.AsyncClient(timeout=45.0) as client:
-            response = await client.post(OCR_ENDPOINT, data=data, files=files)
-            response.raise_for_status()
-            payload = response.json()
-
-        parsed_results = payload.get("ParsedResults") or []
-        if not parsed_results:
-            return None
-
-        raw_text = str(parsed_results[0].get("ParsedText", "")).strip()
+        raw_text = await self._extract_text_with_florence(image_bytes)
         if not raw_text:
             return None
-
         return extract_receipt_data(raw_text)
+
+    async def _extract_text_with_florence(self, image_bytes: bytes) -> str:
+        headers = {"Content-Type": "application/json"}
+        if self.api_token:
+            headers["Authorization"] = f"Bearer {self.api_token}"
+
+        payload = {
+            "model": self.model_id,
+            "task_prompt": "<OCR>",
+            "image_base64": base64.b64encode(image_bytes).decode("utf-8"),
+        }
+
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(self.endpoint_url, json=payload, headers=headers)
+            response.raise_for_status()
+            response_payload = response.json()
+
+        text = self._extract_text_from_response(response_payload)
+        if not text:
+            raise RuntimeError("Florence endpoint tidak mengembalikan teks OCR.")
+        return text
+
+    def _extract_text_from_response(self, payload: Any) -> str:
+        if isinstance(payload, str):
+            return payload.strip()
+
+        if isinstance(payload, list):
+            for item in payload:
+                text = self._extract_text_from_response(item)
+                if text:
+                    return text
+            return ""
+
+        if not isinstance(payload, dict):
+            return ""
+
+        if payload.get("error"):
+            raise RuntimeError(str(payload["error"]))
+
+        for key in ("generated_text", "text", "ocr_text"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+
+        for nested_key in ("result", "output", "data"):
+            if nested_key in payload:
+                text = self._extract_text_from_response(payload[nested_key])
+                if text:
+                    return text
+
+        return ""

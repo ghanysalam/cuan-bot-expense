@@ -1,0 +1,60 @@
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from functools import lru_cache
+
+from dotenv import load_dotenv
+
+
+load_dotenv()
+
+
+@dataclass(frozen=True)
+class Settings:
+    telegram_bot_token: str
+    database_url: str
+    bot_timezone: str
+    telegram_webhook_secret: str
+    webhook_setup_secret: str
+    public_base_url: str
+    florence_endpoint_url: str
+    huggingface_api_token: str
+    florence_model_id: str
+    quickchart_url: str
+    port: int
+
+    @property
+    def resolved_public_base_url(self) -> str:
+        if self.public_base_url:
+            return self.public_base_url.rstrip("/")
+        vercel_url = os.getenv("VERCEL_URL", "").strip()
+        if not vercel_url:
+            return ""
+        if vercel_url.startswith("http://") or vercel_url.startswith("https://"):
+            return vercel_url.rstrip("/")
+        return f"https://{vercel_url}".rstrip("/")
+
+    @property
+    def webhook_url(self) -> str:
+        base_url = self.resolved_public_base_url
+        if not base_url:
+            return ""
+        return f"{base_url}/telegram/webhook"
+
+
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    return Settings(
+        telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", "").strip(),
+        database_url=os.getenv("DATABASE_URL", "").strip(),
+        bot_timezone=os.getenv("BOT_TIMEZONE", "Asia/Jakarta").strip(),
+        telegram_webhook_secret=os.getenv("TELEGRAM_WEBHOOK_SECRET", "").strip(),
+        webhook_setup_secret=os.getenv("WEBHOOK_SETUP_SECRET", "").strip(),
+        public_base_url=os.getenv("PUBLIC_BASE_URL", "").strip(),
+        florence_endpoint_url=os.getenv("FLORENCE_ENDPOINT_URL", "").strip(),
+        huggingface_api_token=os.getenv("HUGGINGFACE_API_TOKEN", "").strip(),
+        florence_model_id=os.getenv("FLORENCE_MODEL_ID", "microsoft/Florence-2-base").strip(),
+        quickchart_url=os.getenv("QUICKCHART_URL", "https://quickchart.io/chart").strip(),
+        port=int(os.getenv("PORT", "8000")),
+    )

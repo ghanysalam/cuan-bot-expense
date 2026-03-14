@@ -1,143 +1,173 @@
-# CuanBot Telegram (Expense + OCR Struk)
+# CuanBot Telegram on Vercel
 
-CuanBot adalah chatbot Telegram untuk mencatat pengeluaran, budgeting, split bill, laporan periodik, dan scan struk/bukti transaksi bank.
+CuanBot adalah chatbot Telegram untuk mencatat pengeluaran, budgeting, split bill, scan struk dengan Florence-2, dan mengirim grafik pengeluaran bulanan sebagai file gambar.
 
-## Fitur
-- Input natural: `Beli kopi 25rb`, `Belanja indomaret 180.000`.
-- Kategori otomatis.
-- Budget mingguan default `Rp2.100.000` + alert 80%.
-- Split bill: `patungan total 450rb untuk 3 orang service 5% pajak 10%`.
-- Laporan mingguan/bulanan (Top 3 kategori + sisa budget).
-- OCR struk:
-  - Merchant dari 3 baris pertama.
-  - Tanggal transaksi (`DD/MM/YY` atau `DD-MM-YYYY`).
-  - Total prioritas keyword: `TOTAL`, `GRAND TOTAL`, `TOTAL BAYAR`, `NETTO`, `AMOUNT DUE`, `JUMLAH`.
-  - Fallback: angka terbesar jika keyword tidak ditemukan.
-  - Jika noise tinggi: bot minta konfirmasi manual total.
-- OCR bukti transaksi bank:
-  - Deteksi transfer/debit/QRIS.
-  - Prioritas nominal transfer (`NOMINAL`, `JUMLAH TRANSFER`, `AMOUNT`, `DEBIT`).
-  - Abaikan saldo, admin, pajak, kembalian.
+## Arsitektur Baru
+- Runtime: FastAPI + webhook Telegram.
+- Deployment: Vercel Serverless Function.
+- Database: PostgreSQL dengan `psycopg_pool`.
+- OCR struk: Florence-2 (`microsoft/Florence-2-base`) melalui endpoint Hugging Face eksternal.
+- Chart: QuickChart API.
 
-## 1) Instalasi dari Nol (Windows CMD)
-### A. Siapkan project
+## Struktur Folder
+```text
+.
+|-- app.py
+|-- main.py
+|-- telegram_bot.py
+|-- vercel.json
+|-- requirements.txt
+|-- .env.example
+`-- expense_bot
+    |-- __init__.py
+    |-- charts.py
+    |-- config.py
+    |-- db.py
+    |-- ocr.py
+    |-- parser.py
+    |-- service.py
+    `-- telegram_app.py
+```
+
+## Environment Variables
+Isi `.env` lokal atau Vercel Project Settings dengan:
+
+```env
+DATABASE_URL=postgresql://USER:PASSWORD@HOST:5432/DBNAME?sslmode=require
+BOT_TIMEZONE=Asia/Jakarta
+TELEGRAM_BOT_TOKEN=ISI_DARI_BOTFATHER
+TELEGRAM_WEBHOOK_SECRET=secret-telegram-webhook
+WEBHOOK_SETUP_SECRET=secret-untuk-setup-webhook
+PUBLIC_BASE_URL=https://nama-project.vercel.app
+FLORENCE_ENDPOINT_URL=https://endpoint-anda.huggingface.cloud
+HUGGINGFACE_API_TOKEN=hf_xxx
+FLORENCE_MODEL_ID=microsoft/Florence-2-base
+QUICKCHART_URL=https://quickchart.io/chart
+```
+
+Catatan:
+- `DATABASE_URL` wajib. SQLite lokal lama tidak dipakai lagi untuk deployment baru.
+- `FLORENCE_ENDPOINT_URL` disarankan berupa Hugging Face Inference Endpoint atau service eksternal yang menjalankan `microsoft/Florence-2-base`.
+- Endpoint Florence diharapkan menerima JSON:
+
+```json
+{
+  "model": "microsoft/Florence-2-base",
+  "task_prompt": "<OCR>",
+  "image_base64": "..."
+}
+```
+
+- Endpoint Florence diharapkan mengembalikan salah satu bentuk berikut:
+
+```json
+{"text": "RAW OCR TEXT"}
+```
+
+atau
+
+```json
+{"generated_text": "RAW OCR TEXT"}
+```
+
+## Jalankan Lokal
 ```bat
-cd /d e:\chatbot
+cd /d d:\chatbot
 python -m venv .venv
 .venv\Scripts\activate.bat
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
-```
-
-### B. Siapkan env
-```bat
 copy .env.example .env
+python main.py
 ```
 
-Isi `e:\chatbot\.env`:
-```env
-DB_PATH=data/expenses.db
-BOT_TIMEZONE=Asia/Jakarta
-TELEGRAM_BOT_TOKEN=ISI_TOKEN_BOTFATHER
-OCR_SPACE_API_KEY=OPSIONAL
+Server lokal jalan di `http://127.0.0.1:8000`.
+
+## Endpoint Aplikasi
+- `GET /health`
+- `POST /telegram/webhook`
+- `GET /telegram/webhook-info`
+- `POST /telegram/setup-webhook`
+- `DELETE /telegram/webhook`
+
+Untuk endpoint setup/info/delete, kirim header:
+
+```text
+X-Setup-Secret: <WEBHOOK_SETUP_SECRET>
 ```
 
-Keterangan:
-- `TELEGRAM_BOT_TOKEN` wajib.
-- `OCR_SPACE_API_KEY` opsional (untuk scan foto struk langsung di Telegram).
+## Setup Webhook Telegram
+Setelah deploy ke Vercel, panggil:
 
-### C. Jalankan lokal
-```bat
-python telegram_bot.py
-```
-
-Jika terminal diam tanpa error, bot aktif dan menunggu chat.
-
-## 2) Cara Buat Token Telegram
-1. Buka Telegram, chat `@BotFather`.
-2. Kirim `/newbot`.
-3. Ikuti instruksi nama dan username bot.
-4. Copy token yang diberikan BotFather.
-5. Tempel ke `.env` pada `TELEGRAM_BOT_TOKEN=...`.
-
-## 3) Alur OCR Struk di Chat
-1. Kirim foto struk ke bot.
-2. Bot balas format:
-   - Merchant
-   - Total
-   - Kategori
-   - Tanggal
-3. Konfirmasi dengan:
-   - `simpan`, atau
-   - `batal`, atau
-   - `ubah total ...`, `ubah kategori ...`, `ubah merchant ...`, `ubah tanggal ...`
-
-Jika struk buram, bot akan kirim:
-`Sepertinya struknya agak buram, boleh konfirmasi total belanjanya berapa, Kak?`
-
-Jika foto adalah bukti transaksi bank, bot akan memberi label kategori `Transfer/Bank`.
-
-## 4) Uji Extractor OCR dari Output PaddleOCR
-Modul `expense_bot/ocr.py` mendukung input `list[str]` atau teks mentah.
-
-Contoh cepat:
-```bat
-python -c "from expense_bot.ocr import extract_receipt_data; print(extract_receipt_data(['STARBUCKS','13/02/26','Grand Total 89.000']).reply_text)"
-```
-
-## 5) Deploy Online ke Railway (24/7)
-### A. Push ke GitHub
-```bat
-cd /d e:\chatbot
-git init
-git add .
-git commit -m "init cuanbot"
-```
-Lalu buat repo GitHub dan push.
-
-### B. Deploy di Railway
-1. Login ke https://railway.app
-2. `New Project` -> `Deploy from GitHub Repo`.
-3. Pilih repo `chatbot`.
-4. Set start command:
 ```bash
-python telegram_bot.py
+curl -X POST https://nama-project.vercel.app/telegram/setup-webhook ^
+  -H "X-Setup-Secret: WEBHOOK_SETUP_SECRET_ANDA"
 ```
 
-### C. Environment Variables di Railway
-Isi variable:
-- `TELEGRAM_BOT_TOKEN=<token>`
-- `BOT_TIMEZONE=Asia/Jakarta`
-- `DB_PATH=/data/expenses.db`
-- `OCR_SPACE_API_KEY=<optional>`
+Webhook akan diarahkan ke:
 
-### D. Persistensi Database
-1. Tambah `Volume` di service Railway.
-2. Mount path ke `/data`.
-3. Karena `DB_PATH=/data/expenses.db`, data SQLite tetap aman saat redeploy.
+```text
+https://nama-project.vercel.app/telegram/webhook
+```
 
-### E. Verifikasi
-1. Trigger deploy.
-2. Buka Logs sampai status normal (tanpa error restart loop).
-3. Uji bot di Telegram:
-   - `/start`
-   - `Beli kopi 25rb`
-   - `/laporan minggu ini`
+Jika `TELEGRAM_WEBHOOK_SECRET` terisi, Telegram harus mengirim header `X-Telegram-Bot-Api-Secret-Token` yang cocok.
 
-## 6) Command Bot
+## Command Bot
 - `/help`
 - `/total`
-- `/total minggu`
-- `/total bulan`
+- `/total_hari_ini`
+- `/total_minggu`
+- `/total_bulan`
 - `/list` atau `/list 20`
-- `/laporan minggu ini`
-- `/laporan bulan ini`
+- `/grafik`
 - `/budget`
 - `/budget 2500000`
 - `/budget kategori Makanan & Minuman 700000`
 - `/hapus <id>`
 - `/reset ya`
 
-## Keamanan
-- Jangan share token bot.
-- Jika token bocor, revoke di BotFather (`/revoke`) lalu ganti di env lokal + Railway.
+Perintah lama `laporan minggu ini` dan `laporan bulan ini` sudah dihapus.
+
+## Perubahan Query
+- `/total_hari_ini` mengambil semua transaksi dengan `expense_date = CURRENT_DATE`.
+- `/total_minggu` mengambil semua transaksi dari Senin minggu ini sampai hari ini.
+- `/total_bulan` mengambil semua transaksi dari tanggal 1 bulan berjalan sampai hari ini.
+- Tidak ada limit row di tiga command tersebut.
+
+## Florence-2 Scan Struk
+Alur scan:
+1. User kirim foto struk.
+2. Bot kirim gambar ke endpoint Florence-2.
+3. Hasil OCR dinormalisasi ke JSON:
+
+```json
+{
+  "item": "Belanja Indomaret",
+  "total": 125000,
+  "tanggal": "14/03/2026",
+  "kategori": "Belanja Bulanan"
+}
+```
+
+4. Bot menyimpan hasil ke tabel `pending_receipts`.
+5. User balas `simpan` atau `ubah total/kategori/merchant/tanggal ...`.
+
+State OCR tidak lagi disimpan di memory, jadi aman untuk runtime serverless.
+
+## Grafik
+Command `/grafik` akan:
+- merangkum pengeluaran bulan ini per kategori dari PostgreSQL,
+- membuat doughnut chart melalui QuickChart,
+- mengirim hasilnya sebagai file PNG ke Telegram.
+
+## Deploy ke Vercel
+1. Push repo ke GitHub.
+2. Import project ke Vercel.
+3. Tambahkan semua environment variables di Project Settings.
+4. Deploy.
+5. Panggil endpoint setup webhook.
+
+## Catatan Infrastruktur
+- Vercel serverless tidak cocok untuk SQLite persisten, jadi database dipindah ke Postgres.
+- Pooling dipakai melalui `psycopg_pool` agar koneksi lebih stabil di serverless.
+- Model Florence-2 tidak dijalankan langsung di Vercel. Bot di Vercel memanggil endpoint model eksternal supaya cold start dan memory tetap aman.

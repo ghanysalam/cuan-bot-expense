@@ -3,11 +3,12 @@ from __future__ import annotations
 import math
 import re
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import date
 from zoneinfo import ZoneInfo
 
-from .db import ExpenseDB
+from .db import ExpenseDB, PendingReceipt
 from .parser import (
+    format_date_id,
     format_idr,
     normalize_category,
     parse_amount_from_text,
@@ -28,15 +29,14 @@ class ExpenseService:
             "- Beli kopi 25rb\n"
             "- Bayar listrik 450000 kategori Tagihan\n\n"
             "Perintah utama:\n"
-            "- /total (ringkasan hari, minggu, bulan)\n"
-            "- /total hari ini\n"
-            "- /total minggu\n"
-            "- /total bulan\n"
-            "- /laporan minggu ini\n"
-            "- /laporan bulan ini\n"
+            "- /total\n"
+            "- /total_hari_ini\n"
+            "- /total_minggu\n"
+            "- /total_bulan\n"
             "- /list 10\n"
-            "- /budget (lihat budget mingguan)\n"
-            "- /budget 2500000 (atur budget mingguan)\n"
+            "- /grafik\n"
+            "- /budget\n"
+            "- /budget 2500000\n"
             "- /budget kategori Makanan & Minuman 700000\n"
             "- /hapus <id>\n"
             "- /reset ya\n\n"
@@ -51,31 +51,12 @@ class ExpenseService:
             return "Kirim item + nominal ya. Contoh: `beli kopi 25rb`"
 
         normalized = clean.lower().strip()
-        tokenized = normalized.replace("/", "", 1).split()
-        command = tokenized[0] if tokenized else ""
-        args = tokenized[1:]
-
-        if command in {"start", "help"}:
+        if normalized in {"start", "help", "/start", "/help"}:
             return self.help_text()
-        if command == "total":
-            return self._reply_total(user_key, args)
-        if command == "list":
-            return self._reply_list(user_key, args)
-        if command == "hapus":
-            return self._reply_delete(user_key, args)
-        if command == "reset":
-            return self._reply_reset(user_key, args)
-        if command in {"budget", "anggaran"}:
-            return self._reply_budget(user_key, clean, args)
-        if command in {"laporan", "report"}:
-            return self._reply_report(user_key, clean, args)
-
-        if normalized.startswith("atur budget") or normalized.startswith("set budget"):
-            return self._reply_budget(user_key, clean, args=[])
         if "laporan minggu" in normalized:
-            return self._render_report(user_key, period="week")
+            return "Perintah laporan minggu sudah dihapus. Pakai `/total_minggu` ya."
         if "laporan bulan" in normalized or "laporan bulanan" in normalized:
-            return self._render_report(user_key, period="month")
+            return "Perintah laporan bulan sudah dihapus. Pakai `/total_bulan` ya."
         if any(
             keyword in normalized
             for keyword in ("investasi", "crypto", "kripto", "forex", "leverage", "futures")
@@ -103,9 +84,20 @@ class ExpenseService:
             "Coba: `beli kopi 25rb` atau `/help` untuk lihat contoh lengkap."
         )
 
-    def record_expense(self, user_key: str, item: str, amount: int, category: str) -> str:
+    def record_expense(
+        self,
+        user_key: str,
+        item: str,
+        amount: int,
+        category: str,
+        expense_date: date | None = None,
+    ) -> str:
         expense_id = self.db.add_expense(
-            user_key=user_key, item=item, amount=amount, category=category
+            user_key=user_key,
+            item=item,
+            amount=amount,
+            category=category,
+            expense_date=expense_date,
         )
         confirmation = (
             f"Siap! {item} senilai {format_idr(amount)} sudah masuk catatan {category}.\n"
@@ -116,61 +108,12 @@ class ExpenseService:
             return confirmation + "\n\n" + alerts
         return confirmation
 
-    def _reply_total(self, user_key: str, args: list[str]) -> str:
-        joined = " ".join(args).lower()
-
-        if "bulan" in joined:
-            start_utc, end_utc = self._local_month_range_utc()
-            total = self.db.total_between(user_key, start_utc.isoformat(), end_utc.isoformat())
-            breakdown = self._category_breakdown_text(
-                self.db.top_categories_between(
-                    user_key=user_key,
-                    start_iso=start_utc.isoformat(),
-                    end_iso=end_utc.isoformat(),
-                    limit=20,
-                )
-            )
-            return f"Total pengeluaran bulan ini: {format_idr(total)}\n{breakdown}"
-
-        if "minggu" in joined:
-            start_utc, end_utc = self._local_week_range_utc()
-            total = self.db.total_between(user_key, start_utc.isoformat(), end_utc.isoformat())
-            breakdown = self._category_breakdown_text(
-                self.db.top_categories_between(
-                    user_key=user_key,
-                    start_iso=start_utc.isoformat(),
-                    end_iso=end_utc.isoformat(),
-                    limit=20,
-                )
-            )
-            return f"Total pengeluaran minggu ini: {format_idr(total)}\n{breakdown}"
-
-        if "hari" in joined:
-            start_utc, end_utc = self._local_day_range_utc()
-            total = self.db.total_between(user_key, start_utc.isoformat(), end_utc.isoformat())
-            breakdown = self._category_breakdown_text(
-                self.db.top_categories_between(
-                    user_key=user_key,
-                    start_iso=start_utc.isoformat(),
-                    end_iso=end_utc.isoformat(),
-                    limit=20,
-                )
-            )
-            day_label = datetime.now(self.tz).strftime("%d-%m-%Y")
-            return f"Total pengeluaran hari ini ({day_label}): {format_idr(total)}\n{breakdown}"
-
-        # Default: tampilkan ringkasan lengkap agar tidak bingung saat ganti hari.
-        today_total = self._total_today(user_key)
-        week_total = self._total_week(user_key)
-        month_total = self._total_month(user_key)
-        month_start_utc, month_end_utc = self._local_month_range_utc()
+    def render_summary(self, user_key: str) -> str:
+        today_total = self.db.total_for_period(user_key, "today")
+        week_total = self.db.total_for_period(user_key, "week")
+        month_total = self.db.total_for_period(user_key, "month")
         month_breakdown = self._category_breakdown_text(
-            self.db.top_categories_between(
-                user_key=user_key,
-                start_iso=month_start_utc.isoformat(),
-                end_iso=month_end_utc.isoformat(),
-                limit=20,
-            )
+            self.db.category_totals_for_period(user_key, "month")
         )
         return (
             "Ringkasan total:\n"
@@ -180,40 +123,62 @@ class ExpenseService:
             f"{month_breakdown}"
         )
 
-    def _reply_list(self, user_key: str, args: list[str]) -> str:
-        limit = 10
-        if args and args[0].isdigit():
-            limit = max(1, min(50, int(args[0])))
+    def render_period_report(self, user_key: str, period: str) -> list[str]:
+        records = self.db.list_for_period(user_key, period)
+        period_label = {"today": "hari ini", "week": "minggu ini", "month": "bulan ini"}[period]
 
+        if not records:
+            return [f"Belum ada transaksi untuk {period_label}."]
+
+        lines = [f"Daftar pengeluaran {period_label} ({len(records)} transaksi):"]
+        total = 0
+        category_totals: dict[str, int] = defaultdict(int)
+        for rec in records:
+            created_local = rec.created_at.astimezone(self.tz)
+            total += rec.amount
+            category_totals[rec.category] += rec.amount
+            lines.append(
+                (
+                    f"#{rec.id} | {format_date_id(rec.expense_date)} | "
+                    f"{created_local.strftime('%H:%M')} | {rec.item} | "
+                    f"{format_idr(rec.amount)} | {rec.category}"
+                )
+            )
+
+        lines.append("")
+        lines.append(f"Total {period_label}: {format_idr(total)}")
+        lines.append("Total per kategori:")
+        for category, amount in sorted(category_totals.items(), key=lambda item: item[1], reverse=True):
+            lines.append(f"- {category}: {format_idr(amount)}")
+        return self._chunk_lines(lines)
+
+    def render_recent_list(self, user_key: str, limit: int = 10) -> list[str]:
         records = self.db.list_recent(user_key=user_key, limit=limit)
         if not records:
-            return "Belum ada transaksi."
+            return ["Belum ada transaksi."]
 
-        rows: list[str] = []
+        lines = [f"Transaksi terakhir ({len(records)} data):"]
         listed_total = 0
         category_totals: dict[str, int] = defaultdict(int)
         for rec in records:
-            local_dt = datetime.fromisoformat(rec.created_at).astimezone(self.tz)
-            dt_txt = local_dt.strftime("%d-%m %H:%M")
+            local_dt = rec.created_at.astimezone(self.tz)
             listed_total += rec.amount
             category_totals[rec.category] += rec.amount
-            rows.append(
-                f"#{rec.id} | {dt_txt} | {rec.item} | {format_idr(rec.amount)} | {rec.category}"
+            lines.append(
+                (
+                    f"#{rec.id} | {format_date_id(rec.expense_date)} {local_dt.strftime('%H:%M')} | "
+                    f"{rec.item} | {format_idr(rec.amount)} | {rec.category}"
+                )
             )
 
-        sorted_categories = sorted(category_totals.items(), key=lambda x: x[1], reverse=True)
-        category_rows = [f"- {cat}: {format_idr(total)}" for cat, total in sorted_categories]
+        lines.append("")
+        lines.append(f"Total dari daftar ini: {format_idr(listed_total)}")
+        lines.append("Total per kategori (dari daftar ini):")
+        for category, total in sorted(category_totals.items(), key=lambda item: item[1], reverse=True):
+            lines.append(f"- {category}: {format_idr(total)}")
+        return self._chunk_lines(lines)
 
-        return (
-            f"Transaksi terakhir ({len(records)} data):\n"
-            + "\n".join(rows)
-            + "\n\n"
-            + f"Total dari daftar ini: {format_idr(listed_total)}\n"
-            + "Total per kategori (dari daftar ini):\n"
-            + ("\n".join(category_rows) if category_rows else "-")
-        )
-
-    def _reply_delete(self, user_key: str, args: list[str]) -> str:
+    def reply_delete(self, user_key: str, args: list[str]) -> str:
         if not args:
             return "Gunakan: /hapus <id>. Contoh: /hapus 10"
         if not args[0].isdigit():
@@ -225,13 +190,13 @@ class ExpenseService:
             return f"Transaksi #{expense_id} tidak ditemukan."
         return f"Transaksi #{expense_id} dihapus."
 
-    def _reply_reset(self, user_key: str, args: list[str]) -> str:
+    def reply_reset(self, user_key: str, args: list[str]) -> str:
         if not args or args[0] != "ya":
             return "Untuk konfirmasi, gunakan: /reset ya"
         count = self.db.clear_user(user_key=user_key)
         return f"Semua data kamu dihapus ({count} transaksi)."
 
-    def _reply_budget(self, user_key: str, raw_text: str, args: list[str]) -> str:
+    def reply_budget(self, user_key: str, raw_text: str, args: list[str]) -> str:
         text_lower = raw_text.lower()
 
         if re.search(r"(?i)budget\s+kategori", raw_text):
@@ -272,45 +237,20 @@ class ExpenseService:
             lines.append(f"- {category}: {format_idr(limit_amount)}")
         return "\n".join(lines)
 
-    def _reply_report(self, user_key: str, raw_text: str, args: list[str]) -> str:
-        joined = " ".join(args).lower() if args else raw_text.lower()
-        if any(token in joined for token in ("bulan", "bulanan", "monthly", "1 bulan")):
-            return self._render_report(user_key, period="month")
-        return self._render_report(user_key, period="week")
+    def monthly_category_totals(self, user_key: str) -> list[tuple[str, int]]:
+        return self.db.category_totals_for_period(user_key, "month")
 
-    def _render_report(self, user_key: str, period: str) -> str:
-        if period == "month":
-            start_utc, end_utc = self._local_month_range_utc()
-            total = self._total_month(user_key)
-            title = "Laporan bulan ini"
-            budget = self.db.get_weekly_budget(user_key) * 4
-            budget_label = "Sisa estimasi anggaran bulanan"
-        else:
-            start_utc, end_utc = self._local_week_range_utc()
-            total = self._total_week(user_key)
-            title = "Laporan minggu ini"
-            budget = self.db.get_weekly_budget(user_key)
-            budget_label = "Sisa anggaran mingguan"
+    def save_pending_receipt(self, pending: PendingReceipt) -> None:
+        self.db.save_pending_receipt(pending)
 
-        top3 = self.db.top_categories_between(
-            user_key=user_key,
-            start_iso=start_utc.isoformat(),
-            end_iso=end_utc.isoformat(),
-            limit=3,
-        )
-        remaining = budget - total
+    def get_pending_receipt(self, user_key: str) -> PendingReceipt | None:
+        return self.db.get_pending_receipt(user_key)
 
-        lines = [title, f"Total pengeluaran: {format_idr(total)}", "Top 3 kategori:"]
-        if not top3:
-            lines.append("1. Belum ada transaksi.")
-        else:
-            for idx, (category, amount) in enumerate(top3, start=1):
-                lines.append(f"{idx}. {category}: {format_idr(amount)}")
-        if remaining >= 0:
-            lines.append(f"{budget_label}: {format_idr(remaining)}")
-        else:
-            lines.append(f"{budget_label}: -{format_idr(abs(remaining))} (melewati budget)")
-        return "\n".join(lines)
+    def clear_pending_receipt(self, user_key: str) -> None:
+        self.db.clear_pending_receipt(user_key)
+
+    def update_pending_receipt(self, pending: PendingReceipt) -> None:
+        self.db.save_pending_receipt(pending)
 
     def _reply_split_bill(self, split) -> str:
         per_person = int(math.ceil(split.grand_total / split.people))
@@ -334,7 +274,7 @@ class ExpenseService:
         alerts: list[str] = []
 
         weekly_budget = self.db.get_weekly_budget(user_key)
-        total_week = self._total_week(user_key)
+        total_week = self.db.total_for_period(user_key, "week")
         if weekly_budget > 0:
             ratio = total_week / weekly_budget
             if ratio >= 1:
@@ -351,7 +291,7 @@ class ExpenseService:
         category_budget = self.db.get_category_budget(user_key, category)
         if category_budget is None:
             category_budget = self._default_category_budget(weekly_budget)
-        category_total = self._total_week_by_category(user_key, category)
+        category_total = self.db.total_by_category_for_period(user_key, "week", category)
         if category_budget > 0:
             ratio = category_total / category_budget
             if ratio >= 1:
@@ -378,47 +318,17 @@ class ExpenseService:
         rows = [f"- {category}: {format_idr(amount)}" for category, amount in category_totals]
         return "Total per kategori:\n" + "\n".join(rows)
 
-    def _local_day_range_utc(self) -> tuple[datetime, datetime]:
-        now_local = datetime.now(self.tz)
-        start_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
-        end_local = start_local + timedelta(days=1)
-        return start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc)
-
-    def _local_week_range_utc(self) -> tuple[datetime, datetime]:
-        now_local = datetime.now(self.tz)
-        start_local = now_local.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(
-            days=now_local.weekday()
-        )
-        end_local = start_local + timedelta(days=7)
-        return start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc)
-
-    def _local_month_range_utc(self) -> tuple[datetime, datetime]:
-        now_local = datetime.now(self.tz)
-        start_local = now_local.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        if start_local.month == 12:
-            next_month = start_local.replace(year=start_local.year + 1, month=1)
-        else:
-            next_month = start_local.replace(month=start_local.month + 1)
-        return start_local.astimezone(timezone.utc), next_month.astimezone(timezone.utc)
-
-    def _total_today(self, user_key: str) -> int:
-        start_utc, end_utc = self._local_day_range_utc()
-        return self.db.total_between(user_key, start_utc.isoformat(), end_utc.isoformat())
-
-    def _total_week(self, user_key: str) -> int:
-        start_utc, end_utc = self._local_week_range_utc()
-        return self.db.total_between(user_key, start_utc.isoformat(), end_utc.isoformat())
-
-    def _total_month(self, user_key: str) -> int:
-        start_utc, end_utc = self._local_month_range_utc()
-        return self.db.total_between(user_key, start_utc.isoformat(), end_utc.isoformat())
-
-    def _total_week_by_category(self, user_key: str, category: str) -> int:
-        start_utc, end_utc = self._local_week_range_utc()
-        return self.db.total_by_category_between(
-            user_key=user_key,
-            category=category,
-            start_iso=start_utc.isoformat(),
-            end_iso=end_utc.isoformat(),
-        )
-
+    @staticmethod
+    def _chunk_lines(lines: list[str], max_chars: int = 3500) -> list[str]:
+        chunks: list[str] = []
+        current: list[str] = []
+        for line in lines:
+            candidate = "\n".join(current + [line]).strip()
+            if current and len(candidate) > max_chars:
+                chunks.append("\n".join(current).strip())
+                current = [line]
+                continue
+            current.append(line)
+        if current:
+            chunks.append("\n".join(current).strip())
+        return chunks
