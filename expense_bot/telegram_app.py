@@ -7,6 +7,7 @@ from io import BytesIO
 from telegram import InputFile, Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 
+from .config import get_settings
 from .charts import ExpenseChartService
 from .db import PendingReceipt
 from .ocr import ReceiptOCR
@@ -156,6 +157,9 @@ def create_telegram_application(
 
         user_key = _user_key(update)
         text = update.message.text.strip()
+        if len(text) > 100:
+            text = text[:100]
+            
         pending = service.get_pending_receipt(user_key)
         low = text.lower()
 
@@ -237,6 +241,17 @@ def create_telegram_application(
 
     async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.exception("Unhandled error while processing update", exc_info=context.error)
+
+    async def auth_middleware_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not update.effective_user:
+            return
+        allowed_users = get_settings().allowed_telegram_users
+        if allowed_users and update.effective_user.id not in allowed_users:
+            if update.message:
+                await update.message.reply_text("Maaf, kamu tidak memiliki akses untuk menggunakan bot ini.")
+            raise context.application.stop_propagation()
+
+    application.add_handler(MessageHandler(filters.ALL, auth_middleware_handler), group=-1)
 
     application.add_handler(CommandHandler("start", start_handler))
     application.add_handler(CommandHandler("help", help_handler))

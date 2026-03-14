@@ -23,6 +23,7 @@ class Settings:
     florence_model_id: str
     quickchart_url: str
     port: int
+    allowed_telegram_users: list[int]
 
     @property
     def resolved_public_base_url(self) -> str:
@@ -57,4 +58,17 @@ def get_settings() -> Settings:
         florence_model_id=os.getenv("FLORENCE_MODEL_ID", "microsoft/Florence-2-base").strip(),
         quickchart_url=os.getenv("QUICKCHART_URL", "https://quickchart.io/chart").strip(),
         port=int(os.getenv("PORT", "8000")),
+        allowed_telegram_users=_parse_allowed_users(os.getenv("ALLOWED_TELEGRAM_USERS", "")),
     )
+
+
+def _parse_allowed_users(raw: str) -> list[int]:
+    clean = raw.strip()
+    if not clean:
+        return []
+    users = []
+    for part in clean.split(","):
+        p = part.strip()
+        if p.isdigit():
+            users.append(int(p))
+    return users

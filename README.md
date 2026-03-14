@@ -43,10 +43,12 @@ FLORENCE_ENDPOINT_URL=https://endpoint-anda.huggingface.cloud
 HUGGINGFACE_API_TOKEN=hf_xxx
 FLORENCE_MODEL_ID=microsoft/Florence-2-base
 QUICKCHART_URL=https://quickchart.io/chart
+ALLOWED_TELEGRAM_USERS=1234567,9876543
 ```
 
 Catatan:
 - `DATABASE_URL` wajib. SQLite lokal lama tidak dipakai lagi untuk deployment baru.
+- `ALLOWED_TELEGRAM_USERS` opsional. Isi dengan ID angka Telegram (dipisah koma) untuk membatasi siapa yang bisa memakai bot. Jika kosong, bot terbuka untuk publik.
 - `FLORENCE_ENDPOINT_URL` disarankan berupa Hugging Face Inference Endpoint atau service eksternal yang menjalankan `microsoft/Florence-2-base`.
 - Endpoint Florence diharapkan menerima JSON:
 

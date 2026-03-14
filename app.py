@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import secrets
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request, status
@@ -111,7 +112,7 @@ async def telegram_webhook(request: Request) -> dict[str, bool]:
     settings = request.app.state.settings
     if settings.telegram_webhook_secret:
         secret_header = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
-        if secret_header != settings.telegram_webhook_secret:
+        if not secrets.compare_digest(secret_header, settings.telegram_webhook_secret):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Webhook secret tidak valid.",
@@ -183,7 +184,7 @@ def _validate_setup_secret(request: Request, settings: Settings) -> None:
             detail="WEBHOOK_SETUP_SECRET belum diisi.",
         )
     secret_header = request.headers.get("X-Setup-Secret", "")
-    if secret_header != settings.webhook_setup_secret:
+    if not secrets.compare_digest(secret_header, settings.webhook_setup_secret):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Setup secret tidak valid.",
