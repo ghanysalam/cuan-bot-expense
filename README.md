@@ -1,3 +1,4 @@
+---
 title: Cuan Bot Expense
 emoji: 💰
 colorFrom: green
