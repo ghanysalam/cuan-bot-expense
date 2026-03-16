@@ -12,8 +12,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# Back4App supplies the PORT environment variable. We default to 8080 if not set.
-ENV PORT=8080
+# Hugging Face Spaces defaults to 7860, and Back4App can override this variable.
+ENV PORT=7860
 
 EXPOSE $PORT
 
